@@ -1,0 +1,88 @@
+variables:
+  AWS_REGION: "eu-west-2"
+  S3_BUCKET_NAME: "s3-terraform-bucket"
+  TF_DIR: ${CI_PROJECT_DIR} 
+  STATE_NAME: "env_creation" 
+  CI_REGISTRY: "registry.dx1.github.com"
+  CI_REGISTRY_IMAGE: "$CI_REGISTRY/app/dragos/terraform_image/terraform:latest"
+  DOCKER_AUTH_CONFIG: >
+    {
+      "auths": {
+        "$CI_REGISTRY": {
+          "username": "$CI_UserName",
+          "password": "$CI_Password"
+        }
+      }
+    }
+image:
+  name: registry.dx1.github.com/app/dragos/terraform_image/terraform:latest 
+  entrypoint:
+    - '/usr/bin/env'
+    - 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+before_script:
+  - rm -rf .terraform
+  - chmod 755 saml2aws .saml2aws
+  - cp .saml2aws ~/.saml2aws
+  - cp .aws/config ~/.aws/config
+  - rm -f ~/.aws/credentials
+  - cd ${TF_DIR}
+  - export DECODED_PASSWORD=$(echo $ADFS_PASS | base64 --decode)
+  - ./saml2aws --skip-prompt --username=$ADFS_USER --password=$DECODED_PASSWORD --url=https://sts.github.com --idp-provider=ADFS --mfa=Auto login --role=$ADFS_AWS_ROLE
+  - terraform init -var-file=terraform.tfvars -backend-config="bucket=s3-terraform-bucket" -backend-config="key=terraform/$tfstate" -backend-config="region=eu-west-2" 
+stages:
+  - validate
+  - plan
+  - build
+  - push_files_to_s3
+  - destroy
+validate:
+  stage: validate
+  tags:
+    - Runner
+    - AWS
+  script:
+    - terraform validate
+  when: manual  
+plan:
+  stage: plan
+  tags:
+    - Runner1
+    - AWS
+  script:
+    - terraform plan -var-file=terraform.tfvars
+  when: manual
+build:
+  stage: build
+  tags:
+    - Runner1
+    - AWS
+  script:
+    - terraform apply -var-file=vars/${environment_type}.tfvars -auto-approve
+
+  artifacts:
+    paths:
+      - ./output.txt
+    expire_in: 1 day
+  when: manual
+
+push_files_to_s3:
+  stage: push_files_to_s3
+  needs: [build]
+  when: delayed
+  allow_failure: false
+  start_in: 2 minutes
+  tags:
+    - Runner1
+    - AWS
+  script:
+    - aws s3 cp ./output.txt s3://s3-terraform-bucket/ --recursive
+
+destroy: 
+  stage: destroy
+  tags:
+    - Runner1
+    - AWS
+  script:
+    - aws s3 rm s3://s3-terraform-bucket/output.txt
+    - terraform destroy -var-file=terraform.tfvars --auto-approve
+  when: manual
